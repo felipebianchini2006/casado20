@@ -1,6 +1,6 @@
 "use client"
 
-import { Facebook, Instagram, Twitter } from "lucide-react"
+import { Facebook, Instagram, Twitter, MessageCircle } from "lucide-react"
 import Image from "next/image"
 
 export function Footer() {
@@ -21,6 +21,15 @@ export function Footer() {
           </div>
           <div className="flex items-center gap-4">
             <a
+              href={`https://wa.me/${process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || '5599996510070'}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary-foreground hover:text-secondary transition-colors"
+              title="Fale conosco no WhatsApp"
+            >
+              <MessageCircle className="w-6 h-6" />
+            </a>
+            <a
               href="#"
               className="text-primary-foreground hover:text-secondary transition-colors"
             >
@@ -40,7 +49,7 @@ export function Footer() {
             </a>
           </div>
         </div>
-        <div className="mt-6 text-center text-sm text-primary-foreground/50">
+        <div className="mt-8 text-center text-sm text-primary-foreground/50 border-t border-primary-foreground/10 pt-6">
           <p>
             &copy; {new Date().getFullYear()} Casa do 20. Todos os direitos
             reservados.

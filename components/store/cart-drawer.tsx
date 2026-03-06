@@ -28,7 +28,7 @@ export function CartDrawer() {
 
   const handleCheckout = () => {
     setIsConfirmationOpen(false)
-    const phoneNumber = "5511999999999" // Substituir pelo número real
+    const phoneNumber = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || "5511999999999" // Fallback de segurança
     const message = encodeURIComponent(
       `Olá! Gostaria de finalizar meu pedido:\n\n${items
         .map((item) => `${item.quantity}x ${item.name} - R$ ${(item.price * item.quantity).toFixed(2)}`)

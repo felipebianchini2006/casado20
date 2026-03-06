@@ -29,7 +29,7 @@ export function ProductDetails({ product, children }: ProductDetailsProps) {
   }
 
   const whatsappMessage = `Olá! Tenho interesse no produto: ${product.name} (Ref: ${product.ref || product.id}). Pode me ajudar?`
-  const whatsappUrl = `https://wa.me/5521971424751?text=${encodeURIComponent(whatsappMessage)}`
+  const whatsappUrl = `https://wa.me/${process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || '5599996510070'}?text=${encodeURIComponent(whatsappMessage)}`
 
   const discount = product.originalPrice
     ? Math.round(((product.originalPrice - product.price) / product.originalPrice) * 100)
