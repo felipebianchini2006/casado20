@@ -15,8 +15,8 @@ export interface StoreImagePipelineResult {
     format: 'webp';
 }
 
-const DEFAULT_MAX_LONG_SIDE = 1600;
-const DEFAULT_QUALITY = 92;
+const DEFAULT_MAX_LONG_SIDE = 2000;
+const DEFAULT_QUALITY = 94;
 const DEFAULT_EFFORT = 6;
 
 export async function processStoreImage(
@@ -44,7 +44,7 @@ export async function processStoreImage(
             fit: 'inside',
             withoutEnlargement: true,
         })
-        .sharpen(0.6)
+        .sharpen(0.75)
         .webp({
             quality,
             effort,

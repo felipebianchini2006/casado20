@@ -21,7 +21,7 @@ export interface ExtractedImage {
     ean: string;
     buffer?: Buffer;
     page: number;
-    sourceStrategy: 'native' | 'render_450' | 'render_600' | 'render_900' | 'render_1200' | 'vision_fallback';
+    sourceStrategy: 'native' | 'render_450' | 'render_600' | 'render_900' | 'render_1200' | 'render_1500' | 'vision_fallback';
     nativeWidth?: number;
     nativeHeight?: number;
     renderDpi?: number;
@@ -215,7 +215,45 @@ Exemplo de saída:
 function isSmallRenderedResult(width: number, height: number): boolean {
     const longSide = Math.max(width, height);
     const shortSide = Math.min(width, height);
-    return longSide < 900 || shortSide < 520 || width * height < 320_000;
+    return longSide < 1_100 || shortSide < 700 || width * height < 450_000;
+}
+
+function pickVisionRenderDpi(box: [number, number, number, number]): 900 | 1200 | 1500 {
+    const [, xmin, ymax, xmax] = box;
+    const widthRatio = Math.abs(xmax - xmin) / 1000;
+    const heightRatio = Math.abs(ymax - box[0]) / 1000;
+    const areaRatio = widthRatio * heightRatio;
+    const longestRatio = Math.max(widthRatio, heightRatio);
+
+    if (areaRatio <= 0.045 || longestRatio <= 0.2) {
+        return 1500;
+    }
+
+    if (areaRatio <= 0.1 || longestRatio <= 0.32) {
+        return 1200;
+    }
+
+    return 900;
+}
+
+function pickStructuralRenderDpi(
+    page: StructuralPdfPage,
+    imageNode: StructuralPdfPage['images'][number]
+): 900 | 1200 | 1500 {
+    const widthRatio = imageNode.width / Math.max(page.width, 1);
+    const heightRatio = imageNode.height / Math.max(page.height, 1);
+    const areaRatio = widthRatio * heightRatio;
+    const longestRatio = Math.max(widthRatio, heightRatio);
+
+    if (areaRatio <= 0.05 || longestRatio <= 0.2) {
+        return 1500;
+    }
+
+    if (areaRatio <= 0.1 || longestRatio <= 0.32) {
+        return 1200;
+    }
+
+    return 900;
 }
 
 function clampCropBox(
@@ -384,16 +422,27 @@ async function processNativeAssociations(
         };
 
         if (!nativeHighQuality) {
-            const rendered900 = await renderPage(900);
-            let structuralCrop = await cropStructuralProduct(rendered900, page, association.image, 900);
-            let structuralStrategy: ExtractedImage['sourceStrategy'] = 'render_900';
+            const initialDpi = pickStructuralRenderDpi(page, association.image);
+            const initialRendered = await renderPage(initialDpi);
+            let structuralCrop = await cropStructuralProduct(initialRendered, page, association.image, initialDpi);
+            let structuralStrategy: ExtractedImage['sourceStrategy'] =
+                initialDpi === 1500 ? 'render_1500' : initialDpi === 1200 ? 'render_1200' : 'render_900';
 
-            if (structuralCrop && isSmallRenderedResult(structuralCrop.width, structuralCrop.height)) {
+            if (initialDpi === 900 && structuralCrop && isSmallRenderedResult(structuralCrop.width, structuralCrop.height)) {
                 const rendered1200 = await renderPage(1200);
                 const retried = await cropStructuralProduct(rendered1200, page, association.image, 1200);
                 if (retried) {
                     structuralCrop = retried;
                     structuralStrategy = 'render_1200';
+                }
+            }
+
+            if (initialDpi !== 1500 && structuralCrop && isSmallRenderedResult(structuralCrop.width, structuralCrop.height)) {
+                const rendered1500 = await renderPage(1500);
+                const retried = await cropStructuralProduct(rendered1500, page, association.image, 1500);
+                if (retried) {
+                    structuralCrop = retried;
+                    structuralStrategy = 'render_1500';
                 }
             }
 
@@ -525,21 +574,86 @@ export async function processPdfBuffer(
                             ean: refId,
                             page: pageNumber,
                             sourceStrategy: 'vision_fallback',
-                            renderDpi: 450,
+                            renderDpi: pickVisionRenderDpi(product.box_2d ?? [0, 0, 1000, 1000]),
                         });
                         handledIds.add(refId);
                         continue;
                     }
 
-                    let processed = await cropVisionProduct(rendered450, product, 450);
-                    let sourceStrategy: ExtractedImage['sourceStrategy'] = 'render_450';
+                    const initialDpi = product.box_2d ? pickVisionRenderDpi(product.box_2d) : 900;
+                    let processed: ProcessedRenderCrop | null;
+                    let sourceStrategy: ExtractedImage['sourceStrategy'];
 
-                    if (processed && isSmallRenderedResult(processed.width, processed.height)) {
-                        rendered600 ??= await renderPage(600);
-                        const retried = await cropVisionProduct(rendered600, product, 600);
+                    if (initialDpi === 1500) {
+                        const rendered1500 = await renderPage(1500);
+                        processed = await cropVisionProduct(rendered1500, product, 1500);
+                        sourceStrategy = 'render_1500';
+                    } else if (initialDpi === 1200) {
+                        const rendered1200 = await renderPage(1200);
+                        processed = await cropVisionProduct(rendered1200, product, 1200);
+                        sourceStrategy = 'render_1200';
+                    } else {
+                        const rendered900 = await renderPage(900);
+                        processed = await cropVisionProduct(rendered900, product, 900);
+                        sourceStrategy = 'render_900';
+                    }
+
+                    if (initialDpi === 900 && processed && isSmallRenderedResult(processed.width, processed.height)) {
+                        const rendered1200 = await renderPage(1200);
+                        const retried = await cropVisionProduct(rendered1200, product, 1200);
                         if (retried) {
                             processed = retried;
+                            sourceStrategy = 'render_1200';
+                        }
+                    }
+
+                    if (initialDpi !== 1500 && processed && isSmallRenderedResult(processed.width, processed.height)) {
+                        const rendered1500 = await renderPage(1500);
+                        const retried = await cropVisionProduct(rendered1500, product, 1500);
+                        if (retried) {
+                            processed = retried;
+                            sourceStrategy = 'render_1500';
+                        }
+                    }
+
+                    if (!processed) {
+                        processed = await cropVisionProduct(rendered450, product, 450);
+                        sourceStrategy = 'render_450';
+                    }
+
+                    if (processed && isSmallRenderedResult(processed.width, processed.height) && sourceStrategy === 'render_450') {
+                        rendered600 ??= await renderPage(600);
+                        const retried600 = await cropVisionProduct(rendered600, product, 600);
+                        if (retried600) {
+                            processed = retried600;
                             sourceStrategy = 'render_600';
+                        }
+                    }
+
+                    if (processed && isSmallRenderedResult(processed.width, processed.height) && sourceStrategy !== 'render_900' && sourceStrategy !== 'render_1200' && sourceStrategy !== 'render_1500') {
+                        const rendered900 = await renderPage(900);
+                        const retried900 = await cropVisionProduct(rendered900, product, 900);
+                        if (retried900) {
+                            processed = retried900;
+                            sourceStrategy = 'render_900';
+                        }
+                    }
+
+                    if (processed && isSmallRenderedResult(processed.width, processed.height) && sourceStrategy !== 'render_1200' && sourceStrategy !== 'render_1500') {
+                        const rendered1200 = await renderPage(1200);
+                        const retried1200 = await cropVisionProduct(rendered1200, product, 1200);
+                        if (retried1200) {
+                            processed = retried1200;
+                            sourceStrategy = 'render_1200';
+                        }
+                    }
+
+                    if (processed && isSmallRenderedResult(processed.width, processed.height) && sourceStrategy !== 'render_1500') {
+                        const rendered1500 = await renderPage(1500);
+                        const retried1500 = await cropVisionProduct(rendered1500, product, 1500);
+                        if (retried1500) {
+                            processed = retried1500;
+                            sourceStrategy = 'render_1500';
                         }
                     }
 

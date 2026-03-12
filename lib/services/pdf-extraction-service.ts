@@ -30,7 +30,7 @@ interface ExtractedProduct {
 
 interface PreparedCatalogImage {
     image: StoreImagePipelineResult;
-    sourceStrategy: 'native' | 'render_450' | 'render_600' | 'render_900' | 'render_1200' | 'vision_fallback';
+    sourceStrategy: 'native' | 'render_450' | 'render_600' | 'render_900' | 'render_1200' | 'render_1500' | 'vision_fallback';
     nativeWidth?: number;
     nativeHeight?: number;
     renderDpi?: number;
@@ -314,7 +314,45 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
     private isSmallFinalResult(width: number, height: number): boolean {
         const longSide = Math.max(width, height);
         const shortSide = Math.min(width, height);
-        return longSide < 900 || shortSide < 520 || width * height < 320_000;
+        return longSide < 1_100 || shortSide < 700 || width * height < 450_000;
+    }
+
+    private pickVisionRenderDpi(box: [number, number, number, number]): 900 | 1200 | 1500 {
+        const [ymin, xmin, ymax, xmax] = box;
+        const widthRatio = Math.abs(xmax - xmin) / 1000;
+        const heightRatio = Math.abs(ymax - ymin) / 1000;
+        const areaRatio = widthRatio * heightRatio;
+        const longestRatio = Math.max(widthRatio, heightRatio);
+
+        if (areaRatio <= 0.045 || longestRatio <= 0.2) {
+            return 1500;
+        }
+
+        if (areaRatio <= 0.1 || longestRatio <= 0.32) {
+            return 1200;
+        }
+
+        return 900;
+    }
+
+    private pickStructuralRenderDpi(
+        page: StructuralPdfPage,
+        imageNode: StructuralPdfPage['images'][number]
+    ): 900 | 1200 | 1500 {
+        const widthRatio = imageNode.width / Math.max(page.width, 1);
+        const heightRatio = imageNode.height / Math.max(page.height, 1);
+        const areaRatio = widthRatio * heightRatio;
+        const longestRatio = Math.max(widthRatio, heightRatio);
+
+        if (areaRatio <= 0.05 || longestRatio <= 0.2) {
+            return 1500;
+        }
+
+        if (areaRatio <= 0.1 || longestRatio <= 0.32) {
+            return 1200;
+        }
+
+        return 900;
     }
 
     async prepareStructuralRenderedImage(
@@ -352,7 +390,7 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
         const image = await processStoreImage(croppedBuffer);
         return {
             image,
-            sourceStrategy: renderDpi === 1200 ? 'render_1200' : 'render_900',
+            sourceStrategy: renderDpi === 1500 ? 'render_1500' : renderDpi === 1200 ? 'render_1200' : 'render_900',
             renderDpi,
             bbox: {
                 ymin: imageNode.top,
@@ -386,7 +424,16 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
         const image = await processStoreImage(croppedBuffer);
         return {
             image,
-            sourceStrategy: renderDpi === 600 ? 'render_600' : 'render_450',
+            sourceStrategy:
+                renderDpi === 1500
+                    ? 'render_1500'
+                    : renderDpi === 1200
+                        ? 'render_1200'
+                        : renderDpi === 900
+                            ? 'render_900'
+                            : renderDpi === 600
+                                ? 'render_600'
+                                : 'render_450',
             renderDpi,
             bbox: {
                 ymin: crop.ymin,
@@ -555,12 +602,21 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
                             && !this.isSmallFinalResult(prepared.image.width, prepared.image.height);
 
                         if (!nativeHighQuality) {
-                            const rendered900 = await renderPage(900);
-                            let structuralPrepared = await this.prepareStructuralRenderedImage(rendered900, page, association.image, 900);
+                            const initialDpi = this.pickStructuralRenderDpi(page, association.image);
+                            const initialRendered = await renderPage(initialDpi);
+                            let structuralPrepared = await this.prepareStructuralRenderedImage(initialRendered, page, association.image, initialDpi);
 
-                            if (structuralPrepared && this.isSmallFinalResult(structuralPrepared.image.width, structuralPrepared.image.height)) {
+                            if (initialDpi === 900 && structuralPrepared && this.isSmallFinalResult(structuralPrepared.image.width, structuralPrepared.image.height)) {
                                 const rendered1200 = await renderPage(1200);
                                 const retried = await this.prepareStructuralRenderedImage(rendered1200, page, association.image, 1200);
+                                if (retried) {
+                                    structuralPrepared = retried;
+                                }
+                            }
+
+                            if (initialDpi !== 1500 && structuralPrepared && this.isSmallFinalResult(structuralPrepared.image.width, structuralPrepared.image.height)) {
+                                const rendered1500 = await renderPage(1500);
+                                const retried = await this.prepareStructuralRenderedImage(rendered1500, page, association.image, 1500);
                                 if (retried) {
                                     structuralPrepared = retried;
                                 }
@@ -617,13 +673,69 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
                     const refId = String(item.ref_id || '').trim();
                     if (!refId || handledRefs.has(refId)) continue;
 
-                    let prepared = await this.prepareRenderedFallbackImage(rendered450, item, 450);
+                    const initialDpi = Array.isArray(item.box_2d) ? this.pickVisionRenderDpi(item.box_2d) : 900;
+                    let prepared: PreparedCatalogImage | null;
 
-                    if (prepared && this.isSmallFinalResult(prepared.image.width, prepared.image.height)) {
-                        rendered600 ??= await renderPage(600);
-                        const retried = await this.prepareRenderedFallbackImage(rendered600, item, 600);
+                    if (initialDpi === 1500) {
+                        const rendered1500 = await renderPage(1500);
+                        prepared = await this.prepareRenderedFallbackImage(rendered1500, item, 1500);
+                    } else if (initialDpi === 1200) {
+                        const rendered1200 = await renderPage(1200);
+                        prepared = await this.prepareRenderedFallbackImage(rendered1200, item, 1200);
+                    } else {
+                        const rendered900 = await renderPage(900);
+                        prepared = await this.prepareRenderedFallbackImage(rendered900, item, 900);
+                    }
+
+                    if (initialDpi === 900 && prepared && this.isSmallFinalResult(prepared.image.width, prepared.image.height)) {
+                        const rendered1200 = await renderPage(1200);
+                        const retried = await this.prepareRenderedFallbackImage(rendered1200, item, 1200);
                         if (retried) {
                             prepared = retried;
+                        }
+                    }
+
+                    if (initialDpi !== 1500 && prepared && this.isSmallFinalResult(prepared.image.width, prepared.image.height)) {
+                        const rendered1500 = await renderPage(1500);
+                        const retried = await this.prepareRenderedFallbackImage(rendered1500, item, 1500);
+                        if (retried) {
+                            prepared = retried;
+                        }
+                    }
+
+                    if (!prepared) {
+                        prepared = await this.prepareRenderedFallbackImage(rendered450, item, 450);
+                    }
+
+                    if (prepared && prepared.sourceStrategy === 'render_450' && this.isSmallFinalResult(prepared.image.width, prepared.image.height)) {
+                        rendered600 ??= await renderPage(600);
+                        const retried600 = await this.prepareRenderedFallbackImage(rendered600, item, 600);
+                        if (retried600) {
+                            prepared = retried600;
+                        }
+                    }
+
+                    if (prepared && prepared.sourceStrategy !== 'render_900' && prepared.sourceStrategy !== 'render_1200' && prepared.sourceStrategy !== 'render_1500' && this.isSmallFinalResult(prepared.image.width, prepared.image.height)) {
+                        const rendered900 = await renderPage(900);
+                        const retried900 = await this.prepareRenderedFallbackImage(rendered900, item, 900);
+                        if (retried900) {
+                            prepared = retried900;
+                        }
+                    }
+
+                    if (prepared && prepared.sourceStrategy !== 'render_1200' && prepared.sourceStrategy !== 'render_1500' && this.isSmallFinalResult(prepared.image.width, prepared.image.height)) {
+                        const rendered1200 = await renderPage(1200);
+                        const retried1200 = await this.prepareRenderedFallbackImage(rendered1200, item, 1200);
+                        if (retried1200) {
+                            prepared = retried1200;
+                        }
+                    }
+
+                    if (prepared && prepared.sourceStrategy !== 'render_1500' && this.isSmallFinalResult(prepared.image.width, prepared.image.height)) {
+                        const rendered1500 = await renderPage(1500);
+                        const retried1500 = await this.prepareRenderedFallbackImage(rendered1500, item, 1500);
+                        if (retried1500) {
+                            prepared = retried1500;
                         }
                     }
 
