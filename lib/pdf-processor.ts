@@ -42,6 +42,32 @@ interface ProcessedRenderCrop {
     renderDpi: number;
 }
 
+function normalizeComparableId(value: string): string {
+    return String(value || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '');
+}
+
+function buildValidIdLookup(validIds?: Set<string>): Map<string, string> {
+    const lookup = new Map<string, string>();
+    if (!validIds) return lookup;
+
+    for (const value of validIds) {
+        const canonical = String(value || '').trim();
+        const normalized = normalizeComparableId(canonical);
+        if (!normalized || lookup.has(normalized)) continue;
+        lookup.set(normalized, canonical);
+    }
+
+    return lookup;
+}
+
+function resolveValidRefId(refId: string, validIdLookup: Map<string, string>): string | null {
+    if (validIdLookup.size === 0) return refId;
+    return validIdLookup.get(normalizeComparableId(refId)) ?? null;
+}
+
 /**
  * Gets the total number of pages in the PDF buffer using pdfinfo.
  */
@@ -225,11 +251,11 @@ function pickVisionRenderDpi(box: [number, number, number, number]): 900 | 1200 
     const areaRatio = widthRatio * heightRatio;
     const longestRatio = Math.max(widthRatio, heightRatio);
 
-    if (areaRatio <= 0.045 || longestRatio <= 0.2) {
+    if (areaRatio <= 0.012 || longestRatio <= 0.12) {
         return 1500;
     }
 
-    if (areaRatio <= 0.1 || longestRatio <= 0.32) {
+    if (areaRatio <= 0.06 || longestRatio <= 0.24) {
         return 1200;
     }
 
@@ -245,11 +271,11 @@ function pickStructuralRenderDpi(
     const areaRatio = widthRatio * heightRatio;
     const longestRatio = Math.max(widthRatio, heightRatio);
 
-    if (areaRatio <= 0.05 || longestRatio <= 0.2) {
+    if (areaRatio <= 0.012 || longestRatio <= 0.12) {
         return 1500;
     }
 
-    if (areaRatio <= 0.1 || longestRatio <= 0.32) {
+    if (areaRatio <= 0.06 || longestRatio <= 0.24) {
         return 1200;
     }
 
@@ -379,6 +405,7 @@ async function processNativeAssociations(
     page: StructuralPdfPage | undefined,
     analysis: StructuralPageAnalysis | null,
     validIds: Set<string> | undefined,
+    validIdLookup: Map<string, string>,
     results: ExtractedImage[],
     handledIds: Set<string>,
     onlyMapping: boolean,
@@ -387,9 +414,10 @@ async function processNativeAssociations(
     if (!page || !analysis?.isTabular) return;
 
     for (const association of analysis.associations) {
-        const refId = String(association.refId || '').trim();
+        const rawRefId = String(association.refId || '').trim();
+        if (!rawRefId) continue;
+        const refId = resolveValidRefId(rawRefId, validIdLookup);
         if (!refId) continue;
-        if (validIds && !validIds.has(refId)) continue;
 
         handledIds.add(refId);
 
@@ -496,6 +524,7 @@ export async function processPdfBuffer(
 ): Promise<ExtractedImage[]> {
     const results: ExtractedImage[] = [];
     const structuralExtractor = new PdfStructuralExtractor();
+    const validIdLookup = buildValidIdLookup(validIds);
 
     try {
         const numPages = await getNumPages(pdfBuffer);
@@ -521,9 +550,10 @@ export async function processPdfBuffer(
             const page = structuralPages.find((entry) => entry.pageNumber === pageNumber);
             const analysis = page ? structuralExtractor.analyzePage(page, validIds) : null;
             const handledIds = new Set<string>();
+            const pageStartedAt = Date.now();
             const renderedByDpi = new Map<number, Promise<Buffer>>();
             const relevantAssociationCount = analysis
-                ? analysis.associations.filter((association) => !validIds || validIds.has(String(association.refId || '').trim())).length
+                ? analysis.associations.filter((association) => !!resolveValidRefId(String(association.refId || '').trim(), validIdLookup)).length
                 : 0;
             const renderPage = (dpi: number) => {
                 if (!renderedByDpi.has(dpi)) {
@@ -538,7 +568,7 @@ export async function processPdfBuffer(
                 );
             }
 
-            await processNativeAssociations(page, analysis, validIds, results, handledIds, onlyMapping, renderPage);
+            await processNativeAssociations(page, analysis, validIds, validIdLookup, results, handledIds, onlyMapping, renderPage);
 
             const needsFallback =
                 !analysis
@@ -548,6 +578,7 @@ export async function processPdfBuffer(
                 || handledIds.size < relevantAssociationCount;
 
             if (!needsFallback) {
+                console.log(`[PDF][PAGE] page=${pageNumber} complete native_only=${handledIds.size} elapsed_ms=${Date.now() - pageStartedAt}`);
                 continue;
             }
 
@@ -556,7 +587,9 @@ export async function processPdfBuffer(
 
             try {
                 rendered450 = await renderPage(450);
+                console.log(`[PDF][VISION] page=${pageNumber} starting dpi=450`);
                 const productsInPage = await analyzePageWithVision(rendered450);
+                console.log(`[PDF][VISION] page=${pageNumber} detected=${productsInPage.length}`);
 
                 if (productsInPage.length === 0) {
                     console.log(`[PDF][VISION] Nenhum item identificado na página ${pageNumber}.`);
@@ -564,9 +597,9 @@ export async function processPdfBuffer(
                 }
 
                 for (const product of productsInPage) {
-                    const refId = String(product.ref_id || '').trim();
+                    const rawRefId = String(product.ref_id || '').trim();
+                    const refId = resolveValidRefId(rawRefId, validIdLookup);
                     if (!refId) continue;
-                    if (validIds && !validIds.has(refId)) continue;
                     if (handledIds.has(refId)) continue;
 
                     if (onlyMapping) {
@@ -681,6 +714,8 @@ export async function processPdfBuffer(
                         renderDpi: processed.renderDpi,
                     });
                 }
+
+                console.log(`[PDF][PAGE] page=${pageNumber} extracted=${handledIds.size} elapsed_ms=${Date.now() - pageStartedAt}`);
             } catch (pageError) {
                 console.error(`[PDF] Error on page ${pageNumber}:`, pageError);
             }

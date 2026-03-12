@@ -324,11 +324,11 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
         const areaRatio = widthRatio * heightRatio;
         const longestRatio = Math.max(widthRatio, heightRatio);
 
-        if (areaRatio <= 0.045 || longestRatio <= 0.2) {
+        if (areaRatio <= 0.012 || longestRatio <= 0.12) {
             return 1500;
         }
 
-        if (areaRatio <= 0.1 || longestRatio <= 0.32) {
+        if (areaRatio <= 0.06 || longestRatio <= 0.24) {
             return 1200;
         }
 
@@ -344,11 +344,11 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
         const areaRatio = widthRatio * heightRatio;
         const longestRatio = Math.max(widthRatio, heightRatio);
 
-        if (areaRatio <= 0.05 || longestRatio <= 0.2) {
+        if (areaRatio <= 0.012 || longestRatio <= 0.12) {
             return 1500;
         }
 
-        if (areaRatio <= 0.1 || longestRatio <= 0.32) {
+        if (areaRatio <= 0.06 || longestRatio <= 0.24) {
             return 1200;
         }
 
@@ -575,6 +575,7 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
             onProgress?.(`📄 Analisando página ${pageNumber}/${pagesToProcess}...`);
 
             try {
+                const pageStartedAt = Date.now();
                 const page = structuralPages.find((entry) => entry.pageNumber === pageNumber);
                 const analysis = page ? this.structuralExtractor.analyzePage(page) : null;
                 const handledRefs = new Set<string>();
@@ -585,6 +586,10 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
                     }
                     return renderedByDpi.get(dpi)!;
                 };
+
+                console.log(
+                    `[BANK][PAGE] page=${pageNumber} tabular=${analysis?.isTabular ? 'yes' : 'no'} associations=${analysis?.associations.length ?? 0} unassigned=${analysis?.unassignedImages ?? 0}`
+                );
 
                 if (page && analysis?.isTabular) {
                     for (const association of analysis.associations) {
@@ -660,11 +665,14 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
                     || handledRefs.size < analysis.associations.length;
 
                 if (!needsFallback) {
+                    console.log(`[BANK][PAGE] page=${pageNumber} complete native_only=${handledRefs.size} elapsed_ms=${Date.now() - pageStartedAt}`);
                     continue;
                 }
 
                 const rendered450 = await renderPage(450);
+                console.log(`[BANK][VISION] page=${pageNumber} starting dpi=450`);
                 const extracted = await this.extractProductsFromImageBuffer(rendered450);
+                console.log(`[BANK][VISION] page=${pageNumber} detected=${extracted.length}`);
                 onProgress?.(`💎 Vision detectou ${extracted.length} itens na página ${pageNumber}.`);
 
                 let rendered600: Buffer | null = null;
@@ -747,6 +755,8 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
                         onProgress?.(`✅ [${prepared.sourceStrategy}] ${item.product_name} (${refId})`);
                     }
                 }
+
+                console.log(`[BANK][PAGE] page=${pageNumber} extracted=${handledRefs.size} elapsed_ms=${Date.now() - pageStartedAt}`);
             } catch (err: any) {
                 onProgress?.(`❌ Erro na página ${pageNumber}: ${err.message}`);
                 console.error(err);
