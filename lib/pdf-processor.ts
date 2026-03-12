@@ -7,6 +7,7 @@ import {
     StructuralPageAnalysis,
     StructuralPdfPage,
     isNativeImageViable,
+    isNativeImageHighQuality,
 } from '@/lib/services/pdf-structural-extractor';
 import { getPopplerSpawnEnv, resolvePopplerBinary } from '@/lib/services/poppler-runtime';
 import { processStoreImage } from '@/lib/services/store-image-pipeline';
@@ -20,7 +21,7 @@ export interface ExtractedImage {
     ean: string;
     buffer?: Buffer;
     page: number;
-    sourceStrategy: 'native' | 'render_450' | 'render_600' | 'vision_fallback';
+    sourceStrategy: 'native' | 'render_450' | 'render_600' | 'render_900' | 'render_1200' | 'vision_fallback';
     nativeWidth?: number;
     nativeHeight?: number;
     renderDpi?: number;
@@ -214,7 +215,7 @@ Exemplo de saída:
 function isSmallRenderedResult(width: number, height: number): boolean {
     const longSide = Math.max(width, height);
     const shortSide = Math.min(width, height);
-    return longSide < 650 || shortSide < 320 || width * height < 180_000;
+    return longSide < 900 || shortSide < 520 || width * height < 320_000;
 }
 
 function clampCropBox(
@@ -263,6 +264,49 @@ async function cropVisionProduct(
     };
 }
 
+async function cropStructuralProduct(
+    renderedPageBuffer: Buffer,
+    page: StructuralPdfPage,
+    imageNode: StructuralPdfPage['images'][number],
+    renderDpi: number
+): Promise<ProcessedRenderCrop | null> {
+    const metadata = await sharp(renderedPageBuffer).metadata();
+    const pageWidth = page.width || 1;
+    const pageHeight = page.height || 1;
+    const renderedWidth = metadata.width ?? 0;
+    const renderedHeight = metadata.height ?? 0;
+    if (!renderedWidth || !renderedHeight) return null;
+
+    const scaleX = renderedWidth / pageWidth;
+    const scaleY = renderedHeight / pageHeight;
+
+    const baseLeft = Math.floor(imageNode.left * scaleX);
+    const baseTop = Math.floor(imageNode.top * scaleY);
+    const baseWidth = Math.ceil(imageNode.width * scaleX);
+    const baseHeight = Math.ceil(imageNode.height * scaleY);
+
+    const padX = Math.max(10, Math.round(baseWidth * 0.025));
+    const padY = Math.max(10, Math.round(baseHeight * 0.025));
+
+    const left = Math.max(0, baseLeft - padX);
+    const top = Math.max(0, baseTop - padY);
+    const width = Math.max(10, Math.min(renderedWidth - left, baseWidth + padX * 2));
+    const height = Math.max(10, Math.min(renderedHeight - top, baseHeight + padY * 2));
+
+    const extractedBuffer = await sharp(renderedPageBuffer)
+        .extract({ left, top, width, height })
+        .toBuffer();
+
+    const processed = await processStoreImage(extractedBuffer);
+
+    return {
+        buffer: processed.buffer,
+        width: processed.width,
+        height: processed.height,
+        renderDpi,
+    };
+}
+
 function logProcessedItem(item: {
     ref: string;
     page: number;
@@ -299,7 +343,8 @@ async function processNativeAssociations(
     validIds: Set<string> | undefined,
     results: ExtractedImage[],
     handledIds: Set<string>,
-    onlyMapping: boolean
+    onlyMapping: boolean,
+    renderPage: (dpi: number) => Promise<Buffer>
 ) {
     if (!page || !analysis?.isTabular) return;
 
@@ -326,26 +371,64 @@ async function processNativeAssociations(
             continue;
         }
 
-        const processed = await processStoreImage(association.image.buffer);
+        const nativeProcessed = await processStoreImage(association.image.buffer);
+        const nativeHighQuality = isNativeImageHighQuality(association.image)
+            && !isSmallRenderedResult(nativeProcessed.width, nativeProcessed.height);
+
+        let chosen = {
+            strategy: 'native' as ExtractedImage['sourceStrategy'],
+            buffer: nativeProcessed.buffer,
+            width: nativeProcessed.width,
+            height: nativeProcessed.height,
+            renderDpi: undefined as number | undefined,
+        };
+
+        if (!nativeHighQuality) {
+            const rendered900 = await renderPage(900);
+            let structuralCrop = await cropStructuralProduct(rendered900, page, association.image, 900);
+            let structuralStrategy: ExtractedImage['sourceStrategy'] = 'render_900';
+
+            if (structuralCrop && isSmallRenderedResult(structuralCrop.width, structuralCrop.height)) {
+                const rendered1200 = await renderPage(1200);
+                const retried = await cropStructuralProduct(rendered1200, page, association.image, 1200);
+                if (retried) {
+                    structuralCrop = retried;
+                    structuralStrategy = 'render_1200';
+                }
+            }
+
+            if (structuralCrop) {
+                chosen = {
+                    strategy: structuralStrategy,
+                    buffer: structuralCrop.buffer,
+                    width: structuralCrop.width,
+                    height: structuralCrop.height,
+                    renderDpi: structuralCrop.renderDpi,
+                };
+            }
+        }
+
         results.push({
             ean: refId,
-            buffer: processed.buffer,
+            buffer: chosen.buffer,
             page: page.pageNumber,
-            sourceStrategy: 'native',
+            sourceStrategy: chosen.strategy,
             nativeWidth: association.image.nativeWidth,
             nativeHeight: association.image.nativeHeight,
-            finalWidth: processed.width,
-            finalHeight: processed.height,
+            renderDpi: chosen.renderDpi,
+            finalWidth: chosen.width,
+            finalHeight: chosen.height,
         });
 
         logProcessedItem({
             ref: refId,
             page: page.pageNumber,
-            strategy: 'native',
+            strategy: chosen.strategy,
             nativeWidth: association.image.nativeWidth,
             nativeHeight: association.image.nativeHeight,
-            finalWidth: processed.width,
-            finalHeight: processed.height,
+            finalWidth: chosen.width,
+            finalHeight: chosen.height,
+            renderDpi: chosen.renderDpi,
         });
     }
 }
@@ -389,9 +472,16 @@ export async function processPdfBuffer(
             const page = structuralPages.find((entry) => entry.pageNumber === pageNumber);
             const analysis = page ? structuralExtractor.analyzePage(page, validIds) : null;
             const handledIds = new Set<string>();
+            const renderedByDpi = new Map<number, Promise<Buffer>>();
             const relevantAssociationCount = analysis
                 ? analysis.associations.filter((association) => !validIds || validIds.has(String(association.refId || '').trim())).length
                 : 0;
+            const renderPage = (dpi: number) => {
+                if (!renderedByDpi.has(dpi)) {
+                    renderedByDpi.set(dpi, renderPageToBuffer(pdfBuffer, pageNumber, dpi));
+                }
+                return renderedByDpi.get(dpi)!;
+            };
 
             if (analysis?.isTabular) {
                 console.log(
@@ -399,7 +489,7 @@ export async function processPdfBuffer(
                 );
             }
 
-            await processNativeAssociations(page, analysis, validIds, results, handledIds, onlyMapping);
+            await processNativeAssociations(page, analysis, validIds, results, handledIds, onlyMapping, renderPage);
 
             const needsFallback =
                 !analysis
@@ -416,7 +506,7 @@ export async function processPdfBuffer(
             let rendered600: Buffer | null = null;
 
             try {
-                rendered450 = await renderPageToBuffer(pdfBuffer, pageNumber, 450);
+                rendered450 = await renderPage(450);
                 const productsInPage = await analyzePageWithVision(rendered450);
 
                 if (productsInPage.length === 0) {
@@ -445,7 +535,7 @@ export async function processPdfBuffer(
                     let sourceStrategy: ExtractedImage['sourceStrategy'] = 'render_450';
 
                     if (processed && isSmallRenderedResult(processed.width, processed.height)) {
-                        rendered600 ??= await renderPageToBuffer(pdfBuffer, pageNumber, 600);
+                        rendered600 ??= await renderPage(600);
                         const retried = await cropVisionProduct(rendered600, product, 600);
                         if (retried) {
                             processed = retried;

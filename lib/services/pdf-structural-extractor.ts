@@ -125,6 +125,21 @@ export function isNativeImageViable(image: StructuralPdfImageNode): boolean {
     return true;
 }
 
+export function isNativeImageHighQuality(image: StructuralPdfImageNode): boolean {
+    const nativeWidth = image.nativeWidth ?? 0;
+    const nativeHeight = image.nativeHeight ?? 0;
+    const longSide = Math.max(nativeWidth, nativeHeight);
+    const shortSide = Math.min(nativeWidth, nativeHeight);
+    const area = nativeWidth * nativeHeight;
+
+    if (!nativeWidth || !nativeHeight) return false;
+    if (longSide < 900) return false;
+    if (shortSide < 600) return false;
+    if (area < 400_000) return false;
+
+    return true;
+}
+
 export class PdfStructuralExtractor {
     async extractFromBuffer(pdfBuffer: Buffer): Promise<StructuralPdfPage[]> {
         const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'catalog-struct-buffer-'));

@@ -11,6 +11,7 @@ import {
     StructuralPageAnalysis,
     StructuralPdfPage,
     isNativeImageViable,
+    isNativeImageHighQuality,
 } from './pdf-structural-extractor';
 import { getPopplerSpawnEnv, resolvePopplerBinary } from './poppler-runtime';
 import { processStoreImage, StoreImagePipelineResult } from './store-image-pipeline';
@@ -29,7 +30,7 @@ interface ExtractedProduct {
 
 interface PreparedCatalogImage {
     image: StoreImagePipelineResult;
-    sourceStrategy: 'native' | 'render_450' | 'render_600' | 'vision_fallback';
+    sourceStrategy: 'native' | 'render_450' | 'render_600' | 'render_900' | 'render_1200' | 'vision_fallback';
     nativeWidth?: number;
     nativeHeight?: number;
     renderDpi?: number;
@@ -313,7 +314,53 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
     private isSmallFinalResult(width: number, height: number): boolean {
         const longSide = Math.max(width, height);
         const shortSide = Math.min(width, height);
-        return longSide < 650 || shortSide < 320 || width * height < 180_000;
+        return longSide < 900 || shortSide < 520 || width * height < 320_000;
+    }
+
+    async prepareStructuralRenderedImage(
+        renderedPageBuffer: Buffer,
+        page: StructuralPdfPage,
+        imageNode: StructuralPdfPage['images'][number],
+        renderDpi: number
+    ): Promise<PreparedCatalogImage | null> {
+        const metadata = await sharp(renderedPageBuffer).metadata();
+        const pageWidth = page.width || 1;
+        const pageHeight = page.height || 1;
+        const renderedWidth = metadata.width ?? 0;
+        const renderedHeight = metadata.height ?? 0;
+        if (!renderedWidth || !renderedHeight) return null;
+
+        const scaleX = renderedWidth / pageWidth;
+        const scaleY = renderedHeight / pageHeight;
+
+        const baseLeft = Math.floor(imageNode.left * scaleX);
+        const baseTop = Math.floor(imageNode.top * scaleY);
+        const baseWidth = Math.ceil(imageNode.width * scaleX);
+        const baseHeight = Math.ceil(imageNode.height * scaleY);
+        const padX = Math.max(10, Math.round(baseWidth * 0.025));
+        const padY = Math.max(10, Math.round(baseHeight * 0.025));
+
+        const left = Math.max(0, baseLeft - padX);
+        const top = Math.max(0, baseTop - padY);
+        const width = Math.max(10, Math.min(renderedWidth - left, baseWidth + padX * 2));
+        const height = Math.max(10, Math.min(renderedHeight - top, baseHeight + padY * 2));
+
+        const croppedBuffer = await sharp(renderedPageBuffer)
+            .extract({ left, top, width, height })
+            .toBuffer();
+
+        const image = await processStoreImage(croppedBuffer);
+        return {
+            image,
+            sourceStrategy: renderDpi === 1200 ? 'render_1200' : 'render_900',
+            renderDpi,
+            bbox: {
+                ymin: imageNode.top,
+                xmin: imageNode.left,
+                ymax: imageNode.top + imageNode.height,
+                xmax: imageNode.left + imageNode.width,
+            },
+        };
     }
 
     async prepareRenderedFallbackImage(
@@ -484,10 +531,50 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
                 const page = structuralPages.find((entry) => entry.pageNumber === pageNumber);
                 const analysis = page ? this.structuralExtractor.analyzePage(page) : null;
                 const handledRefs = new Set<string>();
+                const renderedByDpi = new Map<number, Promise<Buffer>>();
+                const renderPage = (dpi: number) => {
+                    if (!renderedByDpi.has(dpi)) {
+                        renderedByDpi.set(dpi, this.renderPageToBuffer(pdfPath, pageNumber, dpi));
+                    }
+                    return renderedByDpi.get(dpi)!;
+                };
 
                 if (page && analysis?.isTabular) {
-                    const nativePrepared = await this.prepareNativeImage(page, analysis);
-                    for (const [refId, prepared] of nativePrepared.entries()) {
+                    for (const association of analysis.associations) {
+                        const refId = String(association.refId || '').trim();
+                        if (!refId || !association.image.buffer || !isNativeImageViable(association.image)) continue;
+
+                        const nativePrepared = await this.prepareNativeImage(page, {
+                            ...analysis,
+                            associations: [association],
+                        });
+                        let prepared = nativePrepared.get(refId);
+                        if (!prepared) continue;
+
+                        const nativeHighQuality = isNativeImageHighQuality(association.image)
+                            && !this.isSmallFinalResult(prepared.image.width, prepared.image.height);
+
+                        if (!nativeHighQuality) {
+                            const rendered900 = await renderPage(900);
+                            let structuralPrepared = await this.prepareStructuralRenderedImage(rendered900, page, association.image, 900);
+
+                            if (structuralPrepared && this.isSmallFinalResult(structuralPrepared.image.width, structuralPrepared.image.height)) {
+                                const rendered1200 = await renderPage(1200);
+                                const retried = await this.prepareStructuralRenderedImage(rendered1200, page, association.image, 1200);
+                                if (retried) {
+                                    structuralPrepared = retried;
+                                }
+                            }
+
+                            if (structuralPrepared) {
+                                prepared = {
+                                    ...structuralPrepared,
+                                    nativeWidth: association.image.nativeWidth,
+                                    nativeHeight: association.image.nativeHeight,
+                                };
+                            }
+                        }
+
                         const matched = analysis.associations.find((association) => association.refId === refId);
                         const product_name = matched?.matchedTexts.map((text) => text.content).join(' ').slice(0, 255) || refId;
                         const saved = await this.processProductToBank(
@@ -504,7 +591,7 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
 
                         if (saved) {
                             handledRefs.add(refId);
-                            onProgress?.(`✅ [native] ${refId}`);
+                            onProgress?.(`✅ [${prepared.sourceStrategy}] ${refId}`);
                         }
                     }
                 }
@@ -520,7 +607,7 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
                     continue;
                 }
 
-                const rendered450 = await this.renderPageToBuffer(pdfPath, pageNumber, 450);
+                const rendered450 = await renderPage(450);
                 const extracted = await this.extractProductsFromImageBuffer(rendered450);
                 onProgress?.(`💎 Vision detectou ${extracted.length} itens na página ${pageNumber}.`);
 
@@ -533,7 +620,7 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
                     let prepared = await this.prepareRenderedFallbackImage(rendered450, item, 450);
 
                     if (prepared && this.isSmallFinalResult(prepared.image.width, prepared.image.height)) {
-                        rendered600 ??= await this.renderPageToBuffer(pdfPath, pageNumber, 600);
+                        rendered600 ??= await renderPage(600);
                         const retried = await this.prepareRenderedFallbackImage(rendered600, item, 600);
                         if (retried) {
                             prepared = retried;
