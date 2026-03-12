@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseClient';
-import sharp from 'sharp';
+import { processStoreImage } from '@/lib/services/store-image-pipeline';
 
 export async function POST(req: NextRequest) {
     try {
@@ -19,10 +19,8 @@ export async function POST(req: NextRequest) {
         const bytes = await file.arrayBuffer();
         const buffer = Buffer.from(bytes);
 
-        const processedBuffer = await sharp(buffer)
-            .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
-            .webp({ quality: 80 })
-            .toBuffer();
+        const processedImage = await processStoreImage(buffer);
+        const processedBuffer = processedImage.buffer;
 
         // 2. Upload to Storage (Bucket: products)
         const fileName = `${sku}.webp`;
@@ -79,7 +77,9 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({
             success: true,
             url: publicUrl,
-            message: 'Image uploaded and linked successfully'
+            message: 'Image uploaded and linked successfully',
+            width: processedImage.width,
+            height: processedImage.height,
         });
 
     } catch (error: any) {

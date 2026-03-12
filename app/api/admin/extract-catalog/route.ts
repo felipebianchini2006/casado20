@@ -4,6 +4,8 @@ import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
+export const maxDuration = 300;
+
 export async function POST(req: NextRequest) {
     try {
         const formData = await req.formData();

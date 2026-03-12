@@ -10,6 +10,14 @@ export interface MatchResult {
 }
 
 export class ImageMatchService {
+    private getSourceStrategy(candidate: any): string | null {
+        if (typeof candidate?.source_strategy === 'string') return candidate.source_strategy;
+        if (candidate?.bbox_json && typeof candidate.bbox_json.source_strategy === 'string') {
+            return candidate.bbox_json.source_strategy;
+        }
+        return null;
+    }
+
     private normalizeText(text: string): string {
         return (text || '')
             .toLowerCase()
@@ -148,7 +156,7 @@ export class ImageMatchService {
             const candCoverage = candMatched / candTokens.length;
 
             let score = Math.round((coverage * 60) + (candCoverage * 40));
-            let reasons = [];
+            const reasons: string[] = [];
 
             if (coverage > 0.6) reasons.push(`Tokens (${Math.round(coverage * 100)}%)`);
 
@@ -156,6 +164,12 @@ export class ImageMatchService {
             if (cand.ref_id && product.name.toLowerCase().includes(cand.ref_id.toLowerCase())) {
                 score += 40;
                 reasons.push(`Ref OK: ${cand.ref_id}`);
+            }
+
+            const sourceStrategy = this.getSourceStrategy(cand);
+            if (sourceStrategy === 'native') {
+                score += 5;
+                reasons.push('Native');
             }
 
             // Critério de Aceitação: Mínimo 45 para ser AGRESSIVO na migração

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { processPdfBuffer } from '@/lib/pdf-processor';
 import { supabaseAdmin } from '@/lib/supabaseClient';
 
+export const maxDuration = 300;
+
 export async function POST(req: NextRequest) {
     try {
         if (!supabaseAdmin) {
@@ -51,7 +53,6 @@ export async function POST(req: NextRequest) {
                 // 4. Handle Results (Upload and Link)
                 let successCount = 0;
                 let errorCount = 0;
-                const logs: string[] = [];
 
                 for (const item of extracted) {
                     if (!item.buffer) continue;
@@ -81,7 +82,10 @@ export async function POST(req: NextRequest) {
                         if (updateError) {
                             sendProgress({ type: 'progress', message: `⚠️ [${item.ean}] Imagem salva, mas não consegui vincular ao produto.` });
                         } else {
-                            sendProgress({ type: 'progress', message: `✅ [${item.ean}] Sucesso total.` });
+                            sendProgress({
+                                type: 'progress',
+                                message: `✅ [${item.ean}] ${item.sourceStrategy} ${item.finalWidth || '-'}x${item.finalHeight || '-'} (pág. ${item.page})`,
+                            });
                             successCount++;
                         }
                     } catch (err: any) {

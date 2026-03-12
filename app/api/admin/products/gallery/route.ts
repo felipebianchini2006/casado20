@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseClient';
-import sharp from 'sharp';
+import { processStoreImage } from '@/lib/services/store-image-pipeline';
 
 export async function POST(req: NextRequest) {
     try {
@@ -20,10 +20,8 @@ export async function POST(req: NextRequest) {
         const bytes = await file.arrayBuffer();
         const buffer = Buffer.from(bytes);
 
-        const processedBuffer = await sharp(buffer)
-            .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
-            .webp({ quality: 80 })
-            .toBuffer();
+        const processedImage = await processStoreImage(buffer);
+        const processedBuffer = processedImage.buffer;
 
         if (!supabaseAdmin) throw new Error('Supabase Admin not initialized');
 
@@ -104,7 +102,9 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({
             success: true,
             url: publicUrl,
-            message: `Imagem vinculada ao Slot ${slot + 1} com sucesso`
+            message: `Imagem vinculada ao Slot ${slot + 1} com sucesso`,
+            width: processedImage.width,
+            height: processedImage.height,
         });
 
     } catch (error: any) {

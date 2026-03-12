@@ -1,7 +1,7 @@
 import { supabaseAdmin } from '@/lib/supabaseClient';
-import sharp from 'sharp';
 import fs from 'fs';
 import path from 'path';
+import { processStoreImage } from './store-image-pipeline';
 
 function logDebug(msg: string) {
     const p = path.join(process.cwd(), 'debug-enrichment.log');
@@ -23,10 +23,7 @@ export class ImageEnrichmentService {
 
         logDebug(`[Enrichment] Processing and uploading image from ${source}...`);
 
-        const processedBuffer = await sharp(buffer)
-            .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
-            .webp({ quality: 80 })
-            .toBuffer();
+        const processedBuffer = (await processStoreImage(buffer)).buffer;
 
         const imageKey = product.ean || product.sku;
         const fileName = `${imageKey}.webp`;
