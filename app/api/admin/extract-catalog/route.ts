@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { PdfExtractionService } from '@/lib/services/pdf-extraction-service';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -24,16 +25,16 @@ export async function POST(req: NextRequest) {
         // Background processing
         (async () => {
             let tempPdfPath = '';
+            let tempUploadDir = '';
             try {
                 sendProgress({ type: 'progress', message: `🚀 Iniciando processamento de ${file.name}...` });
 
                 // 1. Salvar arquivo temporário
                 const bytes = await file.arrayBuffer();
                 const buffer = Buffer.from(bytes);
-                const tempDir = path.join(process.cwd(), 'temp', 'uploads');
-                if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+                tempUploadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-upload-'));
 
-                tempPdfPath = path.join(tempDir, `${uuidv4()}.pdf`);
+                tempPdfPath = path.join(tempUploadDir, `${uuidv4()}.pdf`);
                 fs.writeFileSync(tempPdfPath, buffer);
 
                 // 2. Inicializar Serviço
@@ -53,6 +54,9 @@ export async function POST(req: NextRequest) {
                 // Cleanup temp PDF
                 if (tempPdfPath && fs.existsSync(tempPdfPath)) {
                     try { fs.unlinkSync(tempPdfPath); } catch (e) { }
+                }
+                if (tempUploadDir && fs.existsSync(tempUploadDir)) {
+                    try { fs.rmSync(tempUploadDir, { recursive: true, force: true }); } catch (e) { }
                 }
                 writer.close();
             }
