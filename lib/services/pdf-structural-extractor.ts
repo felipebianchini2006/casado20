@@ -110,6 +110,73 @@ function isConfidentAssociation(bestScore: number, secondScore: number, hasValid
     return bestScore >= 80 && bestScore - secondScore >= 10;
 }
 
+function scoreCodeCandidates(tokens: string[], validIdLookup: Map<string, string>): CodeCandidate[] {
+    const scored = new Map<string, number>();
+
+    for (const token of tokens) {
+        const normalized = normalizeRefId(token);
+        const canonical = validIdLookup.get(normalized) ?? token;
+        const hasValidId = validIdLookup.has(normalized);
+        const current = scored.get(canonical) ?? 0;
+        const base = hasValidId ? 120 : 55;
+        const digitBonus = /^\d{6,14}$/.test(normalized) ? 12 : 6;
+        scored.set(canonical, current + base + digitBonus);
+    }
+
+    return [...scored.entries()]
+        .map(([refId, score]) => ({ refId, score }))
+        .sort((a, b) => b.score - a.score);
+}
+
+function pickBestAssociation(
+    page: StructuralPdfPage,
+    image: StructuralPdfImageNode,
+    texts: StructuralPdfTextNode[],
+    validIdLookup: Map<string, string>,
+    reason: string
+): NativeImageAssociation | null {
+    if (texts.length === 0) return null;
+
+    const combinedText = texts
+        .map((text) => text.content)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const rawCandidates = [
+        ...texts.flatMap((text) => extractCodeCandidates(text.content)),
+        ...extractCodeCandidates(combinedText),
+    ];
+
+    const candidates = scoreCodeCandidates(rawCandidates, validIdLookup);
+    if (candidates.length === 0) return null;
+
+    const bestCandidate = candidates[0];
+    const secondScore = candidates[1]?.score ?? 0;
+    const normalizedBest = normalizeRefId(bestCandidate.refId);
+    const hasValidId = validIdLookup.has(normalizedBest);
+
+    if (!isConfidentAssociation(bestCandidate.score, secondScore, hasValidId)) {
+        return null;
+    }
+
+    const confidence = Math.min(
+        0.98,
+        hasValidId
+            ? 0.75 + Math.min(0.2, (bestCandidate.score - secondScore) / 100)
+            : 0.62 + Math.min(0.16, (bestCandidate.score - secondScore) / 120)
+    );
+
+    return {
+        refId: bestCandidate.refId,
+        confidence,
+        pageNumber: page.pageNumber,
+        image,
+        matchedTexts: texts,
+        reason,
+    };
+}
+
 export function isNativeImageViable(image: StructuralPdfImageNode): boolean {
     const nativeWidth = image.nativeWidth ?? 0;
     const nativeHeight = image.nativeHeight ?? 0;
@@ -284,75 +351,50 @@ export class PdfStructuralExtractor {
             && leftSpread <= Math.max(page.width * 0.16, 90)
             && rightSideTextCount >= rowsWithText.length;
 
-        if (!isTabular) {
-            return {
-                isTabular: false,
-                associations: [],
-                unassignedImages: usableImages.length,
-                reason: 'layout-not-tabular',
-            };
-        }
-
         const associations: NativeImageAssociation[] = [];
 
-        for (const row of rowsWithText) {
-            const combinedText = row.texts
-                .map((text) => text.content)
-                .join(' ')
-                .replace(/\s+/g, ' ')
-                .trim();
+        if (isTabular) {
+            for (const row of rowsWithText) {
+                const association = pickBestAssociation(
+                    page,
+                    row.image,
+                    row.texts,
+                    validIdLookup,
+                    'tabular-native-proximity'
+                );
 
-            const rawCandidates = [
-                ...row.texts.flatMap((text) => extractCodeCandidates(text.content)),
-                ...extractCodeCandidates(combinedText),
-            ];
-
-            const scored = new Map<string, number>();
-
-            for (const token of rawCandidates) {
-                const normalized = normalizeRefId(token);
-                const canonical = validIdLookup.get(normalized) ?? token;
-                const hasValidId = validIdLookup.has(normalized);
-                const current = scored.get(canonical) ?? 0;
-                const base = hasValidId ? 120 : 55;
-                const digitBonus = /^\d{6,14}$/.test(normalized) ? 12 : 6;
-                const nextScore = current + base + digitBonus;
-
-                scored.set(canonical, nextScore);
+                if (association) {
+                    associations.push(association);
+                }
             }
+        } else {
+            for (const image of usableImages) {
+                const relatedTexts = page.texts.filter((text) => {
+                    const horizontalCenter = image.left + image.width / 2;
+                    const textCenterX = text.left + text.width / 2;
+                    const textCenterY = text.top + text.height / 2;
+                    const imageCenterY = image.top + image.height / 2;
+                    const deltaX = Math.abs(horizontalCenter - textCenterX);
+                    const deltaY = Math.abs(imageCenterY - textCenterY);
+                    const maxDeltaX = Math.max(image.width * 0.9, 140);
+                    const maxDeltaY = Math.max(image.height * 1.1, 120);
+                    const isBelow = text.top >= image.top && text.top <= image.top + image.height + maxDeltaY;
+                    const isAbove = text.top + text.height <= image.top + 24 && text.top + text.height >= image.top - maxDeltaY;
+                    return deltaX <= maxDeltaX && (deltaY <= maxDeltaY || isBelow || isAbove);
+                });
 
-            const candidates: CodeCandidate[] = [...scored.entries()]
-                .map(([refId, score]) => ({ refId, score }))
-                .sort((a, b) => b.score - a.score);
+                const association = pickBestAssociation(
+                    page,
+                    image,
+                    relatedTexts,
+                    validIdLookup,
+                    'grid-native-proximity'
+                );
 
-            if (candidates.length === 0) {
-                continue;
+                if (association) {
+                    associations.push(association);
+                }
             }
-
-            const bestCandidate = candidates[0];
-            const secondScore = candidates[1]?.score ?? 0;
-            const normalizedBest = normalizeRefId(bestCandidate.refId);
-            const hasValidId = validIdLookup.has(normalizedBest);
-
-            if (!isConfidentAssociation(bestCandidate.score, secondScore, hasValidId)) {
-                continue;
-            }
-
-            const confidence = Math.min(
-                0.98,
-                hasValidId
-                    ? 0.75 + Math.min(0.2, (bestCandidate.score - secondScore) / 100)
-                    : 0.62 + Math.min(0.16, (bestCandidate.score - secondScore) / 120)
-            );
-
-            associations.push({
-                refId: bestCandidate.refId,
-                confidence,
-                pageNumber: page.pageNumber,
-                image: row.image,
-                matchedTexts: row.texts,
-                reason: hasValidId ? 'tabular-native-valid-id' : 'tabular-native-proximity',
-            });
         }
 
         const uniqueAssociations = new Map<string, NativeImageAssociation>();
@@ -363,11 +405,20 @@ export class PdfStructuralExtractor {
             }
         }
 
+        if (!isTabular && uniqueAssociations.size === 0) {
+            return {
+                isTabular: false,
+                associations: [],
+                unassignedImages: usableImages.length,
+                reason: 'layout-not-structural',
+            };
+        }
+
         return {
-            isTabular: true,
+            isTabular: isTabular || uniqueAssociations.size > 0,
             associations: [...uniqueAssociations.values()],
             unassignedImages: Math.max(0, usableImages.length - uniqueAssociations.size),
-            reason: 'tabular-layout-detected',
+            reason: isTabular ? 'tabular-layout-detected' : 'grid-layout-detected',
         };
     }
 }

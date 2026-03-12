@@ -167,7 +167,7 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
 
         console.log('[Gemini] Analisando página (Vision Engine)...');
 
-        let retries = 3;
+        let retries = 1;
         while (retries > 0) {
             try {
                 await new Promise((res) => setTimeout(res, 4000));
@@ -189,7 +189,7 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
             } catch (error: any) {
                 if (error.status === 429) {
                     console.warn('⚠️ Rate limit atingido. Aguardando 30 segundos...');
-                    await new Promise((res) => setTimeout(res, 30000));
+                    await new Promise((res) => setTimeout(res, 12000));
                     retries--;
                 } else {
                     throw error;
