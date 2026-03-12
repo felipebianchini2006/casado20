@@ -12,6 +12,7 @@ import {
     StructuralPdfPage,
     isNativeImageViable,
 } from './pdf-structural-extractor';
+import { getPopplerSpawnEnv, resolvePopplerBinary } from './poppler-runtime';
 import { processStoreImage, StoreImagePipelineResult } from './store-image-pipeline';
 
 interface ExtractedProduct {
@@ -94,8 +95,11 @@ export class PdfExtractionService {
      */
     async getNumPages(pdfPath: string): Promise<number> {
         return new Promise((resolve) => {
-            const proc = spawn('pdfinfo', [pdfPath]);
+            const proc = spawn(resolvePopplerBinary('pdfinfo'), [pdfPath], { env: getPopplerSpawnEnv() });
             let stdout = '';
+            proc.on('error', () => {
+                resolve(1);
+            });
             proc.stdout.on('data', (data) => {
                 stdout += data.toString();
             });
@@ -199,7 +203,7 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
         const pdfBuffer = await fs.promises.readFile(pdfPath);
 
         return new Promise((resolve, reject) => {
-            const proc = spawn('pdftoppm', [
+            const proc = spawn(resolvePopplerBinary('pdftoppm'), [
                 '-f',
                 pageNumber.toString(),
                 '-l',
@@ -209,13 +213,28 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
                 dpi.toString(),
                 '-singlefile',
                 '-',
-            ]);
+            ], { env: getPopplerSpawnEnv() });
 
             const chunks: Buffer[] = [];
             let stderr = '';
+            let settled = false;
+
+            const fail = (error: Error) => {
+                if (settled) return;
+                settled = true;
+                reject(error);
+            };
 
             proc.stdin.write(pdfBuffer);
             proc.stdin.end();
+
+            proc.on('error', (error: NodeJS.ErrnoException) => {
+                fail(
+                    error.code === 'ENOENT'
+                        ? new Error('Poppler indisponível no runtime: pdftoppm não encontrado.')
+                        : error
+                );
+            });
 
             proc.stdout.on('data', (data) => {
                 chunks.push(Buffer.from(data));
@@ -226,6 +245,8 @@ Exemplo: [{"product_name": "Nome", "ref_id": "QH-3921", "ncm": "8302.20.00", "pr
             });
 
             proc.on('close', (code) => {
+                if (settled) return;
+                settled = true;
                 if (code !== 0) {
                     reject(new Error(`pdftoppm falhou na página ${pageNumber} (${dpi} DPI): ${stderr}`));
                     return;

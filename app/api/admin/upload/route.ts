@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { processPdfBuffer } from '@/lib/pdf-processor';
+import { assertPopplerAvailable } from '@/lib/services/poppler-runtime';
 import { supabaseAdmin } from '@/lib/supabaseClient';
 
 export const maxDuration = 300;
@@ -26,6 +27,7 @@ export async function POST(req: NextRequest) {
         (async () => {
             try {
                 sendProgress({ type: 'progress', message: `🚀 Iniciando processamento de ${file.name}...` });
+                assertPopplerAvailable();
 
                 // 1. Get Valid IDs from Supabase (MUCH faster than Hiper API)
                 sendProgress({ type: 'progress', message: '🔎 Carregando dicionário de produtos do banco...' });

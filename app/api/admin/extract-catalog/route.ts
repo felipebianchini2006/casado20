@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { PdfExtractionService } from '@/lib/services/pdf-extraction-service';
+import { assertPopplerAvailable } from '@/lib/services/poppler-runtime';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -28,6 +29,7 @@ export async function POST(req: NextRequest) {
             let tempUploadDir = '';
             try {
                 sendProgress({ type: 'progress', message: `🚀 Iniciando processamento de ${file.name}...` });
+                assertPopplerAvailable();
 
                 // 1. Salvar arquivo temporário
                 const bytes = await file.arrayBuffer();

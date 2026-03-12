@@ -8,6 +8,7 @@ import {
     StructuralPdfPage,
     isNativeImageViable,
 } from '@/lib/services/pdf-structural-extractor';
+import { getPopplerSpawnEnv, resolvePopplerBinary } from '@/lib/services/poppler-runtime';
 import { processStoreImage } from '@/lib/services/store-image-pipeline';
 
 // Initialize Gemini for Vision tasks
@@ -45,12 +46,27 @@ interface ProcessedRenderCrop {
  */
 async function getNumPages(pdfBuffer: Buffer): Promise<number> {
     return new Promise((resolve, reject) => {
-        const process = spawn('pdfinfo', ['-']);
+        const process = spawn(resolvePopplerBinary('pdfinfo'), ['-'], { env: getPopplerSpawnEnv() });
         let stdout = '';
         let stderr = '';
+        let settled = false;
+
+        const fail = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            reject(error);
+        };
 
         process.stdin.write(pdfBuffer);
         process.stdin.end();
+
+        process.on('error', (error: NodeJS.ErrnoException) => {
+            fail(
+                error.code === 'ENOENT'
+                    ? new Error('Poppler indisponível no runtime: pdfinfo não encontrado.')
+                    : error
+            );
+        });
 
         process.stdout.on('data', (data) => {
             stdout += data.toString();
@@ -61,6 +77,8 @@ async function getNumPages(pdfBuffer: Buffer): Promise<number> {
         });
 
         process.on('close', (code) => {
+            if (settled) return;
+            settled = true;
             if (code !== 0 && !stdout.includes('Pages:')) {
                 return reject(new Error(`pdfinfo exited with code ${code}: ${stderr}`));
             }
@@ -92,13 +110,28 @@ async function renderPageToBuffer(pdfBuffer: Buffer, pageNumber: number, dpi: nu
             '-singlefile',
             '-',
         ];
-        const process = spawn('pdftoppm', args);
+        const process = spawn(resolvePopplerBinary('pdftoppm'), args, { env: getPopplerSpawnEnv() });
 
         const chunks: Buffer[] = [];
         let stderr = '';
+        let settled = false;
+
+        const fail = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            reject(error);
+        };
 
         process.stdin.write(pdfBuffer);
         process.stdin.end();
+
+        process.on('error', (error: NodeJS.ErrnoException) => {
+            fail(
+                error.code === 'ENOENT'
+                    ? new Error('Poppler indisponível no runtime: pdftoppm não encontrado.')
+                    : error
+            );
+        });
 
         process.stdout.on('data', (data) => {
             chunks.push(Buffer.from(data));
@@ -109,6 +142,8 @@ async function renderPageToBuffer(pdfBuffer: Buffer, pageNumber: number, dpi: nu
         });
 
         process.on('close', (code) => {
+            if (settled) return;
+            settled = true;
             if (code !== 0) {
                 return reject(new Error(`pdftoppm (page ${pageNumber}, dpi ${dpi}) exited with code ${code}: ${stderr}`));
             }

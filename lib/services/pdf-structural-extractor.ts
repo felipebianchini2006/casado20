@@ -1,10 +1,12 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import os from 'os';
 import path from 'path';
 import sharp from 'sharp';
 import * as cheerio from 'cheerio';
+import { getPopplerSpawnEnv, resolvePopplerBinary } from './poppler-runtime';
 
 const execFileAsync = promisify(execFile);
 
@@ -143,9 +145,12 @@ export class PdfStructuralExtractor {
 
         try {
             await execFileAsync(
-                'pdftohtml',
+                resolvePopplerBinary('pdftohtml'),
                 ['-xml', '-hidden', '-nodrm', pdfPath, outputBase],
-                { maxBuffer: 32 * 1024 * 1024 }
+                {
+                    maxBuffer: 32 * 1024 * 1024,
+                    env: getPopplerSpawnEnv(),
+                }
             );
 
             const xmlContent = await fs.readFile(xmlPath, 'utf8');
@@ -176,6 +181,11 @@ export class PdfStructuralExtractor {
                     };
 
                     try {
+                        if (!fsSync.existsSync(absoluteSrc)) {
+                            images.push(image);
+                            continue;
+                        }
+
                         image.buffer = await fs.readFile(absoluteSrc);
                         const metadata = await sharp(image.buffer).metadata();
                         image.nativeWidth = metadata.width ?? undefined;
